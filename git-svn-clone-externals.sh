@@ -1,0 +1,118 @@
+#!/bin/bash
+
+set -e
+
+toplevel_directory="$(git rev-parse --show-cdup)"
+[ -n "$toplevel_directory" ] && { echo "please run from the toplevel directory"; exit 1; }
+
+
+function call()
+{
+	cmd="$@"
+	echo "$cmd"
+	eval "$cmd"
+	return "$?"
+}
+
+function do_clone()
+{
+	test -d .git_externals || return 1
+	module=`echo $remote_url|sed 's,\(.*\)\(/trunk\|/branch.*\|/tag.*\),\1,'`
+	branch=`echo $remote_url|sed 's,\(.*\)\(/trunk\|/branch.*\|/tag.*\),\2,'|sed 's,^/,,'`
+	if [[ $branch = $remote_url ]]; then
+		branch=""
+	fi
+ 	(
+		cd .git_externals
+		if [ -d "$local_directory" ]; then
+			(
+				cd "$local_directory"
+				call git svn fetch --all
+			)
+		else
+			tags="tags"
+			brch="branches"
+			branchpath=$(echo $branch|cut -f1 -d/)
+			echo $tags|grep $branchpath >/dev/null 2>&1 && tags=$branchpath
+			echo $brch|grep $branchpath >/dev/null 2>&1 && brch=$branchpath
+
+			if [ "$module" = "$remote_url" ]; then
+				# URL does not contains any trunk, branches or tags part, so we dont need
+				# additional options for git-svn
+				call git svn clone "$revision" "$module" "$local_directory"
+			else
+				call git svn clone "$revision" "$module" -T trunk -b $brch -t $tags "$local_directory"
+			fi
+
+		fi
+		(
+			branch="$(echo ${branch}|sed 's,/$,,')"
+			if [ -n "$branch" ]; then
+				cd "$local_directory"
+				call git reset --hard $branch
+			fi
+		)
+	)
+}
+
+function do_link()
+{
+	dir="$1"
+	base="$(dirname $dir)"
+	(
+		mkdir -p "$base"
+		cd $base
+		rel=$(git rev-parse --show-cdup)
+		ln -sf ${rel}.git_externals/"$dir"
+	)
+}
+
+function do_excludes()
+{
+	dir="$1"
+	git_excludes_path=.git/info/exclude
+	if ! grep -q '^.git_externals$' "$git_excludes_path"
+	then
+		echo .git_externals >> "$git_excludes_path"
+	fi
+
+	if ! grep -q '^'"$dir"'$' "$git_excludes_path"
+	then
+		echo "$dir" >> "$git_excludes_path"
+	fi
+}
+
+
+git svn show-externals|grep -vE '#|^$'|while read -a words
+do
+	[ -z "${words[*]}" ] && continue
+
+	local_directory="$(echo ${words[0]}|sed 's,^/,,')"
+	revision=""
+	remote_url="${words[1]}"
+
+	if [ -n "${words[2]}" ]; then
+		revision="${words[1]}"
+		remote_url="${words[2]}"
+	fi
+
+    if [ -n "$USE_SSH" ]; then
+        echo "Rewriting url to use SVN+SSH."
+        shopt -s extglob
+        remote_url="${remote_url/+(http|https)/svn+ssh}"
+    fi
+
+    [ -z "${remote_url}" ] && continue
+
+	export local_directory revision remote_url
+
+	echo "$local_directory -> $remote_url"
+
+	dir=`dirname $local_directory`
+	[ -d ".git_externals/$dir" ] || mkdir -p ".git_externals/$dir"
+
+	do_clone "$revision" "$remote_url" "$local_directory" || exit
+	do_link "$local_directory"
+	do_excludes "$local_directory"
+
+done
